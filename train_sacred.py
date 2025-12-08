@@ -43,7 +43,7 @@ def ensure_directories():
 DEFAULT_REWARD_C = {
     "dummy_c": 20,           # burst padding（在当前 burst 尾部插入随机 dummy 包）的权重（使用平方惩罚）
     "morphing_c": 20,       # 插入陌生站点流量的惩罚权重（使用平方惩罚）
-    "base_c": 10,            # 基础奖励系数，控制对数概率项的影响力
+    "base_c": 0,            # 基础奖励系数，控制对数概率项的影响力
 }
 
 DEFAULT_ARGS = {

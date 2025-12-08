@@ -127,7 +127,8 @@ class FlowSequenceTransformer(nn.Module):
         seq_len=1000,
         output_dim=128,
         dropout=0.1,
-        device='cuda'
+        device='cuda',
+        mtu=1500.0
     ):
         super().__init__()
         
@@ -135,6 +136,7 @@ class FlowSequenceTransformer(nn.Module):
         self.seq_len = seq_len
         self.output_dim = output_dim
         self.device = device
+        self.mtu = mtu  # Maximum Transmission Unit，用于归一化包长度
         
         # ========== 嵌入层（只处理包长度）==========
         d_model = 64
@@ -202,6 +204,9 @@ class FlowSequenceTransformer(nn.Module):
         # 提取包长度序列（只有一个通道）
         length_seq = flow_sequence[:, :, :, 0]  # (B, max_flows, seq_len)
         
+        # 归一化包长度（与 graph_builder.py 保持一致）
+        length_seq = length_seq / self.mtu  # 归一化到 [0, 1] 范围
+        
         # ========== 嵌入层（只处理包长度）==========
         # Reshape for Conv1D: (B*max_flows, 1, seq_len)
         length_seq = length_seq.reshape(B * self.max_flows, 1, self.seq_len)
@@ -259,13 +264,15 @@ if __name__ == "__main__":
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\n模型参数量: {total_params:,} ({total_params * 4 / 1024 / 1024:.2f} MB)")
     
-    # 创建测试数据
+    # 创建测试数据（模拟真实的包长度：0-1500 字节）
     batch_size = 32
-    flow_sequences = torch.randn(batch_size, 50, 1000, 1)  # 只有包长度
+    flow_sequences = torch.randint(0, 1501, (batch_size, 50, 1000, 1), dtype=torch.float32)  # 包长度范围 0-1500
     num_flows = torch.randint(1, 51, (batch_size,))
     
     print(f"\n输入形状: {flow_sequences.shape}")
+    print(f"包长度范围: [{flow_sequences.min().item():.0f}, {flow_sequences.max().item():.0f}] bytes")
     print(f"num_flows: {num_flows[:5].tolist()}")
+    print(f"MTU: {model.mtu}")
     
     # 前向传播
     output = model(flow_sequences, num_flows)

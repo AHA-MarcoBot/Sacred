@@ -571,16 +571,16 @@ class FlowTrafficObfuscator:
         packet_defense_counts: Dict[int, int] = {}
         seen_packets = set()
 
-        for flow_batch in batches:
+        for flow_batch in batches:      #batches: 多个 batch 的列表, 每个 episode 调用一次
             # 按 packet_id 分组
             packet_flows_map: Dict[int, List[Dict]] = {}
-            for flow in flow_batch:
+            for flow in flow_batch:     #flow_batch: 一个 batch 内的所有流, 可能来自多个数据包. flow: 一条网络流的完整信息. 每条flow保存其所属数据包的packet_id
                 packet_id = flow.get("packet_id", -1)
                 if packet_id >= 0:
                     packet_flows_map.setdefault(packet_id, []).append(flow)
             
             # 处理每个数据包
-            for packet_id, packet_flows in packet_flows_map.items():
+            for packet_id, packet_flows in packet_flows_map.items():        # 每个数据包, 下面的每次循环中处理一个数据包
                 seen_packets.add(packet_id)
                 
                 # ========== 阶段1：Transformer 处理，收集经验 ==========
@@ -695,7 +695,7 @@ class FlowTrafficObfuscator:
                         is_correct = (predicted_label == true_label)
                         
                         # 计算整个数据包的原始字节数
-                        packet_total_bytes = sum([r['original_bytes'] for r in flow_records])
+                        # packet_total_bytes = sum([r['original_bytes'] for r in flow_records])
                         
                         # ========== 阶段3：填充 reward 并添加到经验回放 ==========
                         for record in flow_records:
@@ -704,7 +704,7 @@ class FlowTrafficObfuscator:
                                 record['padding_bytes'],
                                 record['injected_bytes'],
                                 is_correct,
-                                packet_total_bytes
+                                record['original_bytes']
                             )
                             record['reward'] = reward
                             

@@ -12,7 +12,8 @@ import torch
 
 class FlowSequenceExperience:
     """单条经验记录"""
-    
+
+    # [文档修正] flow_sequence shape: (max_flows, seq_len, 1)
     __slots__ = ['flow_sequence', 'num_flows', 'action', 'reward', 
                  'next_flow_sequence', 'next_num_flows', 'done']
     
@@ -143,11 +144,11 @@ if __name__ == "__main__":
     # 添加一些经验
     print("\n添加经验...")
     for i in range(100):
-        flow_seq = np.random.randn(50, 1000, 2).astype(np.float32)
+        flow_seq = np.random.randn(50, 1000, 1).astype(np.float32)
         num_flows = np.random.randint(1, 51)
         action = np.random.randn(10).astype(np.float32)
         reward = np.random.randn()
-        next_flow_seq = np.random.randn(50, 1000, 2).astype(np.float32)
+        next_flow_seq = np.random.randn(50, 1000, 1).astype(np.float32)
         next_num_flows = np.random.randint(1, 51)
         done = 0.0 if i < 99 else 1.0
         

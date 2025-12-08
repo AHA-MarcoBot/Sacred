@@ -61,7 +61,7 @@ DEFAULT_ARGS = {
     "alpha": 0.2,
     "batch_size": 16,
     "target_update_interval": 1,
-    "replay_size": 1000000,
+    "replay_size": 100000,
     "seed": 42,
     "max_dummy": 10,
     "state_size": 128,
@@ -73,7 +73,7 @@ DEFAULT_ARGS = {
     "max_flows_per_action": 5,
     "min_dummy_packet_size": 200,
     "max_dummy_packet_size": 800,
-    "label_min": 0,
+    "label_min": 1,
     "label_max": 10,
     **DEFAULT_REWARD_C,
 }

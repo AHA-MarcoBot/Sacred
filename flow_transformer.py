@@ -200,11 +200,7 @@ class FlowSequenceTransformer(nn.Module):
         flow_mask = torch.arange(self.max_flows, device=self.device)[None, :] < num_flows[:, None]
         
         # 提取包长度序列（只有一个通道）
-        if flow_sequence.shape[-1] == 1:
-            length_seq = flow_sequence[:, :, :, 0]  # (B, max_flows, seq_len)
-        else:
-            # 兼容旧格式 (B, max_flows, seq_len, 2)，只取第一个通道
-            length_seq = flow_sequence[:, :, :, 0]  # (B, max_flows, seq_len)
+        length_seq = flow_sequence[:, :, :, 0]  # (B, max_flows, seq_len)
         
         # ========== 嵌入层（只处理包长度）==========
         # Reshape for Conv1D: (B*max_flows, 1, seq_len)

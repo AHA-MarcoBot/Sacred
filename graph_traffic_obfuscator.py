@@ -593,8 +593,8 @@ class FlowTrafficObfuscator:
                 time_windows = self._group_flows_by_time_window(packet_flows, self.concurrent_time_threshold)
                 
                 for window_idx, window_flows in enumerate(time_windows):
-                    # 先填充窗口内所有流
                     window_start_count = flow_count
+                    # 先填充窗口内所有流
                     for raw_flow in window_flows:
                         flow = self._clone_flow(raw_flow)
                         flow_features = self.extract_flow_features(flow)
@@ -609,6 +609,12 @@ class FlowTrafficObfuscator:
                     
                     # 对窗口内每个流：使用相同 state，但分别采样不同 action
                     for flow_idx_in_window, raw_flow in enumerate(window_flows):
+
+                        # 【修改点 1】: 在动作发生前，先对当前矩阵进行快照 (这是 S_t)
+                        # 即使 current_state 是旧的，Buffer 里的矩阵数据最好是真实的物理状态
+                        state_before_action = flow_sequence_matrix.copy()
+                        num_flows_before = flow_count
+
                         # 每个流独立采样动作
                         action_dict = self.select_action(current_state)
                         flow = self._clone_flow(raw_flow)
@@ -617,6 +623,18 @@ class FlowTrafficObfuscator:
                         padding_bytes, injected_bytes, defense_flows = self._apply_action_to_flow(
                             flow, action_dict, pool_mapping
                         )
+
+
+                        # ============================================================
+                        # 【修改点 2】: 必须把 Padding 后的新特征写回矩阵！(物理状态更新)
+                        # ============================================================
+                        matrix_idx = window_start_count + flow_idx_in_window
+                        if matrix_idx < self.max_flows:
+                            # 重新提取特征 (包含了 padding 后的 packet_length)
+                            updated_features = self.extract_flow_features(flow)
+                            # 覆盖旧特征
+                            flow_sequence_matrix[matrix_idx] = updated_features
+                            # ============================================================
                         
                         # 收集处理后的流
                         all_processed_flows.append(flow)
@@ -632,19 +650,24 @@ class FlowTrafficObfuscator:
                             if packet_id >= 0:
                                 packet_defense_counts[packet_id] = packet_defense_counts.get(packet_id, 0) + 1
                         
-                        # 获取下一状态（窗口结束后）
+                        # 【修改点 3】: 此时矩阵已更新，可以计算 Next State 了
+                        # 虽然这会调用 Transformer，但这是计算 S_{t+1} 所必须的
+                        # 如果这一步也想省，那 S_{t+1} 就不准确了
+                        state_after_action = flow_sequence_matrix.copy()
+                        num_flows_after = min(flow_count, self.max_flows)
+
                         next_state = self.transformer(
-                            torch.from_numpy(flow_sequence_matrix[np.newaxis, ...]).to(self.device),
-                            torch.tensor([min(flow_count, self.max_flows)], device=self.device)
+                            torch.from_numpy(state_after_action[np.newaxis, ...]).to(self.device),
+                            torch.tensor([num_flows_after], device=self.device)
                         ).squeeze(0).detach().cpu().numpy()
                         
                         # 记录经验（窗口内流共享 state，但有独立 action）
                         flow_records.append({
-                            'flow_sequence': flow_sequence_matrix.copy(),
-                            'num_flows_before': flow_count,  # 修复：使用填充后的流数
+                            'flow_sequence': state_before_action,
+                            'num_flows_before': num_flows_before,
                             'action': action_dict,
-                            'next_flow_sequence': flow_sequence_matrix.copy(),
-                            'next_num_flows': min(flow_count, self.max_flows),
+                            'next_flow_sequence': state_after_action,
+                            'next_num_flows': num_flows_after,
                             'padding_bytes': padding_bytes,
                             'injected_bytes': injected_bytes,
                             'original_bytes': original_bytes,
@@ -899,7 +922,10 @@ class FlowTrafficObfuscator:
                         ).squeeze(0).detach().cpu().numpy()
                         
                         # 对窗口内每个流：使用相同 state，但分别采样不同 action
-                        for raw_flow in window_flows:
+                        for flow_idx_in_window, raw_flow in enumerate(window_flows):
+                            # 【修改点 1】: 在动作发生前，先对当前矩阵进行快照 (评估时不需要保存，但保持逻辑一致性)
+                            # state_before_action = flow_sequence_matrix.copy()  # 评估时不需要
+                            
                             # 每个流独立采样动作
                             action_dict = self.select_action(current_state, deterministic=True)
                             flow = self._clone_flow(raw_flow)
@@ -909,17 +935,33 @@ class FlowTrafficObfuscator:
                                 flow, action_dict, pool_mapping
                             )
                             
+                            # ============================================================
+                            # 【修改点 2】: 必须把 Padding 后的新特征写回矩阵！(物理状态更新)
+                            # ============================================================
+                            matrix_idx = window_start_count + flow_idx_in_window
+                            if matrix_idx < self.max_flows:
+                                # 重新提取特征 (包含了 padding 后的 packet_length)
+                                updated_features = self.extract_flow_features(flow)
+                                # 覆盖旧特征
+                                flow_sequence_matrix[matrix_idx] = updated_features
+                            # ============================================================
+                            
                             all_processed_flows.append(flow)
                             total_padding += padding_bytes
                             total_injected += injected_bytes
                             total_original += float(np.sum(np.abs(flow.get("packet_length", []))))
                             
+                            # 插入防御流到序列矩阵
                             for defense_flow in defense_flows:
                                 all_processed_flows.append(defense_flow)
                                 if flow_count < self.max_flows:
                                     defense_features = self.extract_flow_features(defense_flow)
                                     flow_sequence_matrix[flow_count] = defense_features
                                     flow_count += 1
+                            
+                            # 【修改点 3】: 评估时不需要计算 next_state，因为不需要保存经验
+                            # 但如果后续流需要基于更新后的状态采样动作，可以在这里更新 current_state
+                            # 注意：当前实现中窗口内流共享 current_state，所以这里不更新
                     
                     # 阶段2：分类
                     if self.classifier and all_processed_flows:

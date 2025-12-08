@@ -674,6 +674,7 @@ class FlowTrafficObfuscator:
                             'reward': None,
                             'is_last': (window_idx == len(time_windows) - 1 and flow_idx_in_window == len(window_flows) - 1)
                         })
+                        current_state = next_state
                 
                 # ========== 阶段2：只建一次图，用于分类评估 ==========
                 if flow_records and self.classifier is not None:

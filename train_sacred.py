@@ -41,15 +41,15 @@ def ensure_directories():
 
 
 DEFAULT_REWARD_C = {
-    "dummy_c": 20,           # burst padding（在当前 burst 尾部插入随机 dummy 包）的权重（使用平方惩罚）
-    "morphing_c": 20,       # 插入陌生站点流量的惩罚权重（使用平方惩罚）
-    "base_c": 0,            # 基础奖励系数，控制对数概率项的影响力
+    "dummy_c": 100000,           # burst padding（在当前 burst 尾部插入随机 dummy 包）的权重（使用平方惩罚）
+    "morphing_c": 100000,       # 插入陌生站点流量的惩罚权重（使用平方惩罚）
+    "base_c": 50000,            # 基础奖励系数，控制对数概率项的影响力
 }
 
 DEFAULT_ARGS = {
     "data_path": './sacred_dataset/fgnet_dataset_d1.npz',
     "defense_data_path": './sacred_dataset/random_website_50x10_dataset.npz',
-    "dataset_split_ratio": 0.05,
+    "dataset_split_ratio": 0.1,
     "fgnet_model_path": './fgnet_state_dict.pth',
     "fgnet_layer_type": 'GAT',
     # SAC 训练参数
@@ -406,6 +406,9 @@ def main():
 
     logging.info(f"Selected labels for training: {selected_labels}")
 
+    # 收集所有标签的评估结果，用于最终汇总统计
+    all_label_eval_results = []
+
     for label in selected_labels:
         label_train_indices = train_label_map.get(label, [])
         if not label_train_indices:
@@ -518,16 +521,20 @@ def main():
             )
             evaluation_acc = None
             if label_test_packets:
-                sample_count = min(args.batch_size, len(label_test_packets))
-                sample_indices = random.sample(range(len(label_test_packets)), sample_count)
-                eval_batch = []
-                for pkt_idx in sample_indices:
-                    packet_flows = label_test_packets[pkt_idx]
-                    for flow in packet_flows:
-                        if len(flow.get("packet_length", [])) > 0:
-                            eval_batch.append(copy.deepcopy(flow))
-                if eval_batch:
-                    eval_snapshot = obfuscator.evaluate_on_test_data([eval_batch])
+                # 使用所有测试集进行评估，而不是只取部分样本
+                test_batches = []
+                for batch_idx in build_index_batches(len(label_test_packets), args.batch_size, shuffle=False):
+                    batch_flows = []
+                    for pkt_idx in batch_idx:
+                        if pkt_idx < len(label_test_packets):
+                            packet_flows = label_test_packets[pkt_idx]
+                            for flow in packet_flows:
+                                if len(flow.get("packet_length", [])) > 0:
+                                    batch_flows.append(copy.deepcopy(flow))
+                    if batch_flows:
+                        test_batches.append(batch_flows)
+                if test_batches:
+                    eval_snapshot = obfuscator.evaluate_on_test_data(test_batches)
                     evaluation_acc = eval_snapshot.get("overall_accuracy", 0.0)
 
             logging.info(
@@ -614,6 +621,86 @@ def main():
                 }
             }, f, indent=2)
         logging.info(f"[Label {label}] Evaluation results saved to {eval_output_path}")
+        
+        # 保存当前标签的评估结果到汇总列表
+        all_label_eval_results.append({
+            'label': label,
+            'overall_accuracy': eval_results['overall_accuracy'],
+            'avg_cost_ratio': eval_results['avg_cost_ratio'],
+            'total_samples': eval_results['total_samples'],
+            'class_details': eval_results['class_details']
+        })
+
+    # ========== 所有标签训练完成后的总体统计 ==========
+    if all_label_eval_results:
+        logging.info("=" * 80)
+        logging.info("OVERALL STATISTICS (All Labels)")
+        logging.info("=" * 80)
+        
+        # 计算总体统计
+        total_samples_all = sum(r['total_samples'] for r in all_label_eval_results)
+        total_correct_all = 0
+        total_original_bytes_all = 0.0
+        total_defense_bytes_all = 0.0
+        
+        # 汇总所有标签的详细统计
+        for result in all_label_eval_results:
+            # 从 class_details 汇总所有统计数据
+            for class_id, details in result['class_details'].items():
+                total_correct_all += details['correct']
+                total_original_bytes_all += details['original_bytes']
+                total_defense_bytes_all += details['defense_bytes']
+        
+        # 计算总体识别成功率
+        overall_success_rate = total_correct_all / total_samples_all if total_samples_all > 0 else 0.0
+        
+        # 计算总体带宽开销百分比
+        overall_overhead_percentage = (total_defense_bytes_all / total_original_bytes_all * 100.0) if total_original_bytes_all > 0 else 0.0
+        
+        logging.info(f"Total test samples across all labels: {total_samples_all}")
+        logging.info(f"Total correct predictions: {total_correct_all}")
+        logging.info(f"Overall success rate: {overall_success_rate:.4f} ({overall_success_rate*100:.2f}%)")
+        logging.info(f"Total original bytes: {total_original_bytes_all:.2f}")
+        logging.info(f"Total defense bytes: {total_defense_bytes_all:.2f}")
+        logging.info(f"Overall bandwidth overhead: {overall_overhead_percentage:.2f}%")
+        
+        # 按标签输出详细统计
+        logging.info("\nPer-label statistics:")
+        logging.info(f"{'Label':<10} {'Accuracy':<15} {'Cost Ratio':<15} {'Samples':<15}")
+        logging.info("-" * 55)
+        for result in all_label_eval_results:
+            logging.info(
+                f"{result['label']:<10} "
+                f"{result['overall_accuracy']:<15.4f} "
+                f"{result['avg_cost_ratio']:<15.4f} "
+                f"{result['total_samples']:<15}"
+            )
+        
+        logging.info("=" * 80)
+        
+        # 保存总体统计到JSON文件
+        overall_stats_path = f'./logs/overall_stats_all_labels_ep{args.episodes}.json'
+        os.makedirs(os.path.dirname(overall_stats_path), exist_ok=True)
+        with open(overall_stats_path, 'w') as f:
+            json.dump({
+                'overall_success_rate': float(overall_success_rate),
+                'overall_success_rate_percentage': float(overall_success_rate * 100.0),
+                'overall_bandwidth_overhead_percentage': float(overall_overhead_percentage),
+                'total_samples': int(total_samples_all),
+                'total_correct': int(total_correct_all),
+                'total_original_bytes': float(total_original_bytes_all),
+                'total_defense_bytes': float(total_defense_bytes_all),
+                'per_label_results': [
+                    {
+                        'label': int(r['label']),
+                        'overall_accuracy': float(r['overall_accuracy']),
+                        'avg_cost_ratio': float(r['avg_cost_ratio']),
+                        'total_samples': int(r['total_samples'])
+                    }
+                    for r in all_label_eval_results
+                ]
+            }, f, indent=2)
+        logging.info(f"Overall statistics saved to {overall_stats_path}")
 
     
 if __name__ == "__main__":

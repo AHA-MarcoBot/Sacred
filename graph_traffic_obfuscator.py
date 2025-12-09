@@ -116,7 +116,6 @@ class FlowTrafficObfuscator:
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.lr)
         self.alpha = torch.tensor(alpha, device=self.device)
-        self.target_entropy = -1.0
 
         # ========== 核心改变：使用 Transformer 替代 Graph Encoder ==========
         self.transformer = FlowSequenceTransformer(
@@ -144,6 +143,7 @@ class FlowTrafficObfuscator:
         self.defense_site_classes = defense_site_classes
         self.defense_pool_by_label: Dict[int, List[Dict]] = {}
         self.defense_label_list: List[int] = []
+        self.target_entropy = -float(self.action_dim)
 
         # Actor
         self.actor = GaussianPolicy(
@@ -278,8 +278,7 @@ class FlowTrafficObfuscator:
         
         # 提取 burst padding sequence（最后 pad_length 维）
         burst_padding_logits = action[-self.pad_length:]
-        burst_padding_sequence = torch.nn.functional.softplus(burst_padding_logits)
-        burst_padding_sequence = torch.clamp(burst_padding_sequence, 0, 5.0)
+        burst_padding_sequence = torch.clamp(burst_padding_logits, min=0.0)
 
         defense_labels = []
         if self.max_defense_slots > 0:
@@ -515,7 +514,8 @@ class FlowTrafficObfuscator:
         if is_correct:
             base_reward = -1.0 * coeff_base
         else:
-            base_reward = 1.0 * coeff_base
+            # base_reward = 1.0 * coeff_base
+            base_reward = 0.0
 
         # 计算开销比例
         padding_ratio = padding_bytes / packet_total_original_bytes

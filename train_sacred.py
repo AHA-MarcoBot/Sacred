@@ -43,13 +43,13 @@ def ensure_directories():
 DEFAULT_REWARD_C = {
     "dummy_c": 100000,           # burst padding（在当前 burst 尾部插入随机 dummy 包）的权重（使用平方惩罚）
     "morphing_c": 100000,       # 插入陌生站点流量的惩罚权重（使用平方惩罚）
-    "base_c": 50000,            # 基础奖励系数，控制对数概率项的影响力
+    "base_c": 300000,            # 基础奖励系数，控制对数概率项的影响力
 }
 
 DEFAULT_ARGS = {
     "data_path": './sacred_dataset/fgnet_dataset_d1.npz',
     "defense_data_path": './sacred_dataset/random_website_50x10_dataset.npz',
-    "dataset_split_ratio": 0.1,
+    "dataset_split_ratio": 0.25,
     "fgnet_model_path": './fgnet_state_dict.pth',
     "fgnet_layer_type": 'GAT',
     # SAC 训练参数
@@ -73,8 +73,8 @@ DEFAULT_ARGS = {
     "max_flows_per_action": 5,
     "min_dummy_packet_size": 200,
     "max_dummy_packet_size": 800,
-    "label_min": 1,
-    "label_max": 10,
+    "label_min": 10,
+    "label_max": 25,
     **DEFAULT_REWARD_C,
 }
 
@@ -292,7 +292,7 @@ def main():
     logging.info(f"Using device: {device}")
 
     logging.info(f"Loading data from {args.data_path}")
-    train_dataset, test_dataset, vaildation_dataset = load_spilt_dataset(data_path=args.data_path,
+    train_dataset, test_dataset = load_spilt_dataset(data_path=args.data_path,
                                                     split_ratio=args.dataset_split_ratio)
 
     labels_flat = np.array(train_dataset['labels']).astype(int)

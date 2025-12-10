@@ -506,35 +506,25 @@ class FlowTrafficObfuscator:
             is_correct: 分类器是否正确
             packet_total_original_bytes: 整个数据包的原始字节数
         """
+        TARGET_OVERHEAD = 0.10      # 目标开销 15%
+        TARGET_CONFIDENCE = 0.05    # 目标置信度 5%
+
+        packet_total_original_bytes = max(packet_total_original_bytes, 100.0)   # 保底 100 字节，防止分母过小
         coeff_dummy = float(self.reward_c.get("dummy_c", 1.0))
         coeff_inject = float(self.reward_c.get("morphing_c", 1.0))
         coeff_base = float(self.reward_c.get("base_c", 10.0))
-
-        # Base reward: 成功欺骗 → +1，失败 → -1
-        if is_correct:
-            base_reward = -1.0 * coeff_base
-        else:
-            # base_reward = 1.0 * coeff_base
-            base_reward = 0.0
 
         # 计算开销比例
         padding_ratio = padding_bytes / packet_total_original_bytes
         inject_ratio = injected_bytes / packet_total_original_bytes
         
-        target_overhead = 0.1
-        
-        # Padding 惩罚
-        # if padding_ratio > target_overhead:
-        #     dummy_penalty = coeff_dummy * (padding_ratio / target_overhead) ** 2
-        # else:
-        #     dummy_penalty = coeff_dummy * padding_ratio
+
+        if prob > TARGET_CONFIDENCE:
+            base_reward = -1.0 * coeff_base
+        else:
+            base_reward = 0.0
+
         dummy_penalty = coeff_dummy * padding_ratio
-        
-        # Inject 惩罚
-        # if inject_ratio > target_overhead:
-        #     inject_penalty = coeff_inject * (inject_ratio / target_overhead) ** 2
-        # else:
-        #     inject_penalty = coeff_inject * inject_ratio
         inject_penalty = coeff_inject * inject_ratio
 
         reward = base_reward - (dummy_penalty + inject_penalty)

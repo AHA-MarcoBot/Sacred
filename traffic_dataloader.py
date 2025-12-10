@@ -5,22 +5,21 @@ import random
 
 def load_spilt_dataset(
     data_path: str,
-    split_ratio: float = 0.05,
+    split_ratio: float = 0.2,
     random_seed: int = 42
-) -> Tuple[Dict, Dict, Dict]:
+) -> Tuple[Dict, Dict]:
     """
-    加载 npz 数据集并按照指定比例划分训练集、测试集和验证集。
+    加载 npz 数据集并按照指定比例划分训练集和测试集。
     
     Args:
         data_path: npz 文件路径
-        split_ratio: 测试集和验证集各自的比例（默认 0.05，即各占 5%）
+        split_ratio: 测试集比例（默认 0.2，即占 20%）
         random_seed: 随机种子，用于保证划分的可重复性
     
     Returns:
         train_dataset: 训练集字典，包含 packet_length, arrive_time_delta, 
                       start_timestamp, end_timestamp, labels
         test_dataset: 测试集字典，结构同训练集
-        validation_dataset: 验证集字典，结构同训练集
     """
     # 设置随机种子
     random.seed(random_seed)
@@ -40,10 +39,8 @@ def load_spilt_dataset(
     num_samples = len(labels)
     
     # 计算划分点
-    # 测试集和验证集各占 split_ratio，训练集占剩余部分
     test_size = int(num_samples * split_ratio)
-    validation_size = int(num_samples * split_ratio)
-    train_size = num_samples - test_size - validation_size
+    train_size = num_samples - test_size
     
     # 生成随机索引
     indices = np.arange(num_samples)
@@ -51,8 +48,7 @@ def load_spilt_dataset(
     
     # 划分索引
     train_indices = indices[:train_size]
-    test_indices = indices[train_size:train_size + test_size]
-    validation_indices = indices[train_size + test_size:]
+    test_indices = indices[train_size:]
     
     # 构建训练集
     train_dataset = {
@@ -72,21 +68,11 @@ def load_spilt_dataset(
         'labels': labels[test_indices]
     }
     
-    # 构建验证集
-    validation_dataset = {
-        'packet_length': packet_length[validation_indices],
-        'arrive_time_delta': arrive_time_delta[validation_indices],
-        'start_timestamp': start_timestamp[validation_indices],
-        'end_timestamp': end_timestamp[validation_indices],
-        'labels': labels[validation_indices]
-    }
-    
     print(f"数据集划分完成:")
     print(f"  训练集: {train_size} 样本 ({train_size/num_samples*100:.2f}%)")
     print(f"  测试集: {test_size} 样本 ({test_size/num_samples*100:.2f}%)")
-    print(f"  验证集: {validation_size} 样本 ({validation_size/num_samples*100:.2f}%)")
     
-    return train_dataset, test_dataset, validation_dataset
+    return train_dataset, test_dataset
 
 
 def get_dataset_statistics(dataset: Dict) -> Union[str, Dict]:

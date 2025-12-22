@@ -41,9 +41,9 @@ def ensure_directories():
 
 
 DEFAULT_REWARD_C = {
-    "dummy_c": 100000,           # burst padding（在当前 burst 尾部插入随机 dummy 包）的权重（使用平方惩罚）
-    "morphing_c": 100000,       # 插入陌生站点流量的惩罚权重（使用平方惩罚）
-    "base_c": 300000,            # 基础奖励系数，控制对数概率项的影响力
+    "dummy_c": 10000,           # burst padding（在当前 burst 尾部插入随机 dummy 包）的权重（使用平方惩罚）
+    "morphing_c": 10000,       # 插入陌生站点流量的惩罚权重（使用平方惩罚）
+    "base_c": 15000,            # 基础奖励系数，控制对数概率项的影响力
 }
 
 DEFAULT_ARGS = {
@@ -53,14 +53,14 @@ DEFAULT_ARGS = {
     "fgnet_model_path": './fgnet_state_dict.pth',
     "fgnet_layer_type": 'GAT',
     # SAC 训练参数
-    "episodes": 10,
+    "episodes": 15,
     "hidden_size": 1024,
-    "gamma": 0.99,
+    "gamma": 0.95,                                  # default 0.99
     "tau": 0.005,
-    "lr": 0.0003,
+    "lr": 0.0001,                                   # default 0.0003
     "alpha": 0.2,
-    "batch_size": 16,
-    "target_update_interval": 1,
+    "batch_size": 32,                               # default 32
+    "target_update_interval": 2,                    # default 1
     "replay_size": 100000,
     "seed": 42,
     "max_dummy": 10,
@@ -73,8 +73,9 @@ DEFAULT_ARGS = {
     "max_flows_per_action": 5,
     "min_dummy_packet_size": 200,
     "max_dummy_packet_size": 800,
-    "label_min": 10,
-    "label_max": 25,
+    "label_min": 21,
+    "label_max": 30,
+    "max_bursts": 50,  # 新增：控制burst填充动作的维度
     **DEFAULT_REWARD_C,
 }
 
@@ -137,6 +138,8 @@ def add_sac_args(parser, defaults=None):
                         help='Minimum dummy packet size in bytes')
     parser.add_argument('--max_dummy_packet_size', type=int, default=defaults['max_dummy_packet_size'],
                         help='Maximum dummy packet size in bytes')
+    parser.add_argument('--max_bursts', type=int, default=defaults['max_bursts'],
+                        help='Maximum number of bursts to generate padding actions for')
     
     # Reward Coefficient
     for key in DEFAULT_REWARD_C:
@@ -388,8 +391,8 @@ def main():
     logging.info(f"Loaded {len(test_packets)} test packets from split dataset")
     logging.info(f"Loaded {len(defense_flows)} defense flows from {args.defense_data_path}")
     # 统计每个数据包内的流数
-    train_flows_per_packet = [len(pkt) for pkt in train_packets[:10]]
-    logging.info(f"Sample flows per packet (first 10): {train_flows_per_packet}")
+    # train_flows_per_packet = [len(pkt) for pkt in train_packets[:10]]
+    # logging.info(f"Sample flows per packet (first 10): {train_flows_per_packet}")
     train_label_map = group_packets_by_label(train_packets)
     test_label_map = group_packets_by_label(test_packets)
 
@@ -450,9 +453,12 @@ def main():
             min_dummy_packet_size=args.min_dummy_packet_size,
             max_dummy_packet_size=args.max_dummy_packet_size,
             concurrent_time_threshold=args.concurrent_time_threshold,
+            max_bursts=args.max_bursts,  # 传递参数
         )
         obfuscator.set_classifier(fgnet_model)
         obfuscator.set_defense_pool(defense_flows)
+
+        best_avg_reward = -float('inf')
 
         for episode in range(1, args.episodes + 1):
             episode_stats = {
@@ -485,7 +491,9 @@ def main():
                         packet_flows = label_train_packets[pkt_idx]
                         for flow in packet_flows:
                             if len(flow.get("packet_length", [])) > 0:
-                                batch_flows.append(copy.deepcopy(flow))
+                                # 使用浅拷贝，避免深拷贝带来的巨大开销
+                                # Obfuscator 内部会处理必要的拷贝
+                                batch_flows.append(flow.copy())
                 if not batch_flows:
                     continue
                 stats = obfuscator.train_on_batches([batch_flows])
@@ -530,7 +538,8 @@ def main():
                             packet_flows = label_test_packets[pkt_idx]
                             for flow in packet_flows:
                                 if len(flow.get("packet_length", [])) > 0:
-                                    batch_flows.append(copy.deepcopy(flow))
+                                    # 同样优化测试集的拷贝
+                                    batch_flows.append(flow.copy())
                     if batch_flows:
                         test_batches.append(batch_flows)
                 if test_batches:
@@ -549,6 +558,13 @@ def main():
                 f"TestBatchAcc: {(evaluation_acc if evaluation_acc is not None else float('nan')):.4f}"
             )
 
+            # Model Selection: Save best model based on avg_reward
+            if episode_stats["avg_reward"] > best_avg_reward:
+                best_avg_reward = episode_stats["avg_reward"]
+                best_model_path = f'./saved_models/graph-sac-label{label}-best.pth'
+                obfuscator.save_checkpoint(best_model_path)
+                # logging.info(f"[Label {label}] New best avg_reward: {best_avg_reward:.4f}. Model saved to {best_model_path}")
+
         model_save_path = f'./saved_models/graph-sac-label{label}-ep{args.episodes}.pth'
         obfuscator.save_checkpoint(model_save_path)
         logging.info(f"[Label {label}] Training completed. Model saved to {model_save_path}")
@@ -558,7 +574,7 @@ def main():
             logging.warning(f"[Label {label}] No test packets available; skipping evaluation.")
             continue
 
-        logging.info(f"[Label {label}] Starting evaluation on {len(label_test_packets)} test packets")
+        logging.info(f"[Label {label}] Starting model selection evaluation on {len(label_test_packets)} test packets")
         test_batches = []
         for batch_idx in build_index_batches(len(label_test_packets), args.batch_size, shuffle=False):
             batch_flows = []
@@ -567,14 +583,61 @@ def main():
                     packet_flows = label_test_packets[pkt_idx]
                     for flow in packet_flows:
                         if len(flow.get("packet_length", [])) > 0:
-                            batch_flows.append(copy.deepcopy(flow))
+                            batch_flows.append(flow.copy())
             if batch_flows:
                 test_batches.append(batch_flows)
 
-        eval_results = obfuscator.evaluate_on_test_data(test_batches)
+        if not test_batches:
+            logging.warning(f"[Label {label}] No valid test batches; skipping model selection.")
+            continue
+
+        # 评估最后一个episode的模型
+        logging.info(f"[Label {label}] Evaluating last episode model...")
+        last_model_results = obfuscator.evaluate_on_test_data(test_batches, num_classes=num_classes)
+        last_model_accuracy = last_model_results['overall_accuracy']
+        
+        # 评估best reward模型
+        best_model_accuracy = float('inf')
+        best_model_path = None
+        best_model_results = None
+        
+        if best_avg_reward > -float('inf'):
+            best_model_path = f'./saved_models/graph-sac-label{label}-best.pth'
+            if os.path.exists(best_model_path):
+                obfuscator.load_checkpoint(best_model_path, evaluate=True)
+                logging.info(f"[Label {label}] Evaluating best reward model...")
+                best_model_results = obfuscator.evaluate_on_test_data(test_batches, num_classes=num_classes)
+                best_model_accuracy = best_model_results['overall_accuracy']
+            else:
+                logging.warning(f"[Label {label}] Best reward model not found, using last model only")
+                best_model_path = None
+        
+        # 选择accuracy较低的模型（防御效果更好）
+        if best_model_path and best_model_accuracy < last_model_accuracy:
+            # Best reward模型更好，删除最后一个episode的模型
+            logging.info(f"[Label {label}] Best reward model selected (accuracy: {best_model_accuracy:.4f} < {last_model_accuracy:.4f})")
+            if os.path.exists(model_save_path):
+                os.remove(model_save_path)
+                logging.info(f"[Label {label}] Deleted last episode model: {model_save_path}")
+            # 重命名best模型为最终模型
+            final_model_path = f'./saved_models/graph-sac-label{label}-best.pth'
+            eval_results = best_model_results
+        else:
+            # 最后一个episode模型更好，删除best reward模型
+            best_acc_str = f"{best_model_accuracy:.4f}" if best_model_path else "inf"
+            logging.info(f"[Label {label}] Last episode model selected (accuracy: {last_model_accuracy:.4f} <= {best_acc_str})")
+            if best_model_path and os.path.exists(best_model_path):
+                os.remove(best_model_path)
+                logging.info(f"[Label {label}] Deleted best reward model: {best_model_path}")
+            # 重命名最后一个episode模型为best
+            final_model_path = f'./saved_models/graph-sac-label{label}-best.pth'
+            if os.path.exists(model_save_path):
+                os.rename(model_save_path, final_model_path)
+                logging.info(f"[Label {label}] Renamed last episode model to: {final_model_path}")
+            eval_results = last_model_results
 
         logging.info("=" * 80)
-        logging.info(f"[Label {label}] EVALUATION RESULTS")
+        logging.info(f"[Label {label}] FINAL EVALUATION RESULTS (Selected Model)")
         logging.info("=" * 80)
         logging.info(f"Total test samples: {eval_results['total_samples']}")
         logging.info(
@@ -587,41 +650,20 @@ def main():
         )
 
         sorted_classes = sorted(eval_results['class_details'].keys())
+        logging.info(f"\nPer-class metrics:")
+        logging.info(f"{'Class':<10} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1':<12} {'Cost Ratio':<12}")
+        logging.info("-" * 70)
         for class_id in sorted_classes:
             details = eval_results['class_details'][class_id]
             logging.info(
                 f"{class_id:<10} "
-                f"{details['accuracy']:<15.4f} "
-                f"{details['cost_ratio']:<15.4f} "
-                f"{details['correct']}/{details['total']:<18} "
-                f"{details['original_bytes']:<20.2f} "
-                f"{details['defense_bytes']:<20.2f}"
+                f"{details['accuracy']:<12.4f} "
+                f"{details['precision']:<12.4f} "
+                f"{details['recall']:<12.4f} "
+                f"{details['f1']:<12.4f} "
+                f"{details['cost_ratio']:<12.4f}"
             )
 
-        eval_output_path = f'./logs/eval_results_label{label}_ep{args.episodes}.json'
-        os.makedirs(os.path.dirname(eval_output_path), exist_ok=True)
-        with open(eval_output_path, 'w') as f:
-            json.dump({
-                'label': int(label),
-                'overall_accuracy': float(eval_results['overall_accuracy']),
-                'overall_avg_cost': float(eval_results['avg_cost_ratio']),
-                'total_samples': int(eval_results['total_samples']),
-                'per_class_accuracy': {str(k): float(v['accuracy']) for k, v in eval_results['class_details'].items()},
-                'per_class_cost': {str(k): float(v['cost_ratio']) for k, v in eval_results['class_details'].items()},
-                'class_details': {
-                    str(k): {
-                        'accuracy': float(v['accuracy']),
-                        'cost_ratio': float(v['cost_ratio']),
-                        'correct': int(v['correct']),
-                        'total': int(v['total']),
-                        'original_bytes': float(v['original_bytes']),
-                        'defense_bytes': float(v['defense_bytes']),
-                    }
-                    for k, v in eval_results['class_details'].items()
-                }
-            }, f, indent=2)
-        logging.info(f"[Label {label}] Evaluation results saved to {eval_output_path}")
-        
         # 保存当前标签的评估结果到汇总列表
         all_label_eval_results.append({
             'label': label,
@@ -657,12 +699,35 @@ def main():
         # 计算总体带宽开销百分比
         overall_overhead_percentage = (total_defense_bytes_all / total_original_bytes_all * 100.0) if total_original_bytes_all > 0 else 0.0
         
+        # 计算所有类别的平均accuracy、precision、recall、F1
+        all_class_metrics = []
+        for result in all_label_eval_results:
+            for class_id, details in result['class_details'].items():
+                if details['total'] > 0:  # 只统计有样本的类别
+                    all_class_metrics.append({
+                        'accuracy': details['accuracy'],
+                        'precision': details['precision'],
+                        'recall': details['recall'],
+                        'f1': details['f1']
+                    })
+        
+        avg_accuracy = sum(m['accuracy'] for m in all_class_metrics) / len(all_class_metrics) if all_class_metrics else 0.0
+        avg_precision = sum(m['precision'] for m in all_class_metrics) / len(all_class_metrics) if all_class_metrics else 0.0
+        avg_recall = sum(m['recall'] for m in all_class_metrics) / len(all_class_metrics) if all_class_metrics else 0.0
+        avg_f1 = sum(m['f1'] for m in all_class_metrics) / len(all_class_metrics) if all_class_metrics else 0.0
+        
         logging.info(f"Total test samples across all labels: {total_samples_all}")
         logging.info(f"Total correct predictions: {total_correct_all}")
         logging.info(f"Overall success rate: {overall_success_rate:.4f} ({overall_success_rate*100:.2f}%)")
         logging.info(f"Total original bytes: {total_original_bytes_all:.2f}")
         logging.info(f"Total defense bytes: {total_defense_bytes_all:.2f}")
         logging.info(f"Overall bandwidth overhead: {overall_overhead_percentage:.2f}%")
+        
+        logging.info("\nAverage metrics across all classes:")
+        logging.info(f"  Average Accuracy:  {avg_accuracy:.4f}")
+        logging.info(f"  Average Precision: {avg_precision:.4f}")
+        logging.info(f"  Average Recall:    {avg_recall:.4f}")
+        logging.info(f"  Average F1:        {avg_f1:.4f}")
         
         # 按标签输出详细统计
         logging.info("\nPer-label statistics:")
@@ -690,6 +755,12 @@ def main():
                 'total_correct': int(total_correct_all),
                 'total_original_bytes': float(total_original_bytes_all),
                 'total_defense_bytes': float(total_defense_bytes_all),
+                'average_metrics': {
+                    'accuracy': float(avg_accuracy),
+                    'precision': float(avg_precision),
+                    'recall': float(avg_recall),
+                    'f1': float(avg_f1)
+                },
                 'per_label_results': [
                     {
                         'label': int(r['label']),

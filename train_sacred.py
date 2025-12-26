@@ -52,6 +52,8 @@ DEFAULT_ARGS = {
     "dataset_split_ratio": 0.25,
     "fgnet_model_path": './fgnet_state_dict.pth',
     "fgnet_layer_type": 'GAT',
+    "classifier_type": 'transgraphnet',  # 'fgnet' 或 'transgraphnet'
+    "transgraphnet_model_path": './Transgraphnet/transgraphnet_from_npz_state_dict.pth',  # 优先使用从NPZ训练的模型
     # SAC 训练参数
     "episodes": 15,
     "hidden_size": 1024,
@@ -93,6 +95,10 @@ def add_sac_args(parser, defaults=None):
                         help='Path to the converted FG-net state_dict (.pth)')
     parser.add_argument('--fgnet_layer_type', type=str, default=defaults['fgnet_layer_type'],
                         choices=['GCN', 'GAT'], help='Layer type for FG-net model (GCN or GAT)')
+    parser.add_argument('--classifier_type', type=str, default=defaults['classifier_type'],
+                        choices=['fgnet', 'transgraphnet'], help='Classifier type: fgnet or transgraphnet')
+    parser.add_argument('--transgraphnet_model_path', type=str, default=defaults['transgraphnet_model_path'],
+                        help='Path to the TransGraphNet state_dict (.pth)')
     parser.add_argument('--label_min', type=int, default=defaults['label_min'],
                         help='Minimum label id (inclusive) to train SAC on')
     parser.add_argument('--label_max', type=int, default=defaults['label_max'],
@@ -284,6 +290,35 @@ def load_fgnet_model(model, checkpoint_path, optimizer=None):
     logging.info(f"Loaded FG-net state_dict from {ckpt_path}")
     return model
 
+
+def load_transgraphnet_model(model, checkpoint_path, optimizer=None):
+    """
+    加载 TransGraphNet 模型权重。
+    
+    Args:
+        model: 模型实例
+        optimizer: 优化器实例（此函数中未使用，但为保持兼容性保留）
+        checkpoint_path: 模型检查点路径
+    
+    Returns:
+        加载的模型对象
+    """
+    ckpt_path = Path(checkpoint_path).expanduser()
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"TransGraphNet checkpoint not found: {ckpt_path}")
+
+    payload = torch.load(ckpt_path, map_location="cpu")
+    if isinstance(payload, dict) and "state_dict" in payload:
+        state_dict = payload["state_dict"]
+    elif isinstance(payload, dict):
+        state_dict = payload
+    else:
+        raise ValueError(f"Unsupported checkpoint format: {ckpt_path}")
+
+    model.load_state_dict(state_dict, strict=False)  # 使用strict=False以兼容可能的键名差异
+    logging.info(f"Loaded TransGraphNet state_dict from {ckpt_path}")
+    return model
+
 def main():
     ensure_directories()
     logging.basicConfig(filename='./logs/myapp.log', level=logging.INFO)
@@ -306,66 +341,178 @@ def main():
     train_dataset_stats = get_dataset_statistics(train_dataset)
     logging.info(f"Training Dataset stats: {train_dataset_stats}")
 
-    # Load pre-trained FG-net model
-    try:
-        import spapp_classifier
-        
-        logging.info(f"Loading FG-net model from {args.fgnet_model_path}")
-        logging.info(f"Model layer type: {args.fgnet_layer_type}")
-        
-        # 确定设备类型（适配 train.py 的格式）
-        use_gpu = torch.cuda.is_available() and str(device) != "cpu"
-        if use_gpu:
-            device_id = str(device)  # e.g., "cuda:0"
-        else:
-            device_id = "cpu"
-        
-        # 初始化模型（在加载权重之前创建）
-        fgnet_model = spapp_classifier.App_Classifier(
-            nb_classes=num_classes,
-            use_gpu=use_gpu,
-            device=device_id,
-            layer_type=args.fgnet_layer_type
-        )
-        
-        # 加载模型权重（load_fgnet_model 函数会返回完整的模型对象）
-        fgnet_model = load_fgnet_model(fgnet_model, optimizer=None, checkpoint_path=args.fgnet_model_path)
-        
-        # 检查模型类别数是否与数据集匹配
-        model_num_classes = fgnet_model.nb_classes
-        if model_num_classes != num_classes:
-            logging.warning(f"Model number of classes ({model_num_classes}) does not match dataset number of classes ({num_classes})")
-            logging.warning(f"Using model's number of classes: {model_num_classes}")
-        
-        # 确保模型在正确的设备上
-        if use_gpu:
-            device_obj = torch.device(device_id)
-            fgnet_model = fgnet_model.to(device_obj)
-            fgnet_model.device = device_id
-        else:
-            fgnet_model = fgnet_model.to(torch.device("cpu"))
-            fgnet_model.device = "cpu"
-        
-        # 设置为评估模式
-        fgnet_model.eval()
-        
-        logging.info(f"FG-net model loaded successfully")
-        logging.info(f"Model device: {device}")
-        logging.info(f"Model number of classes: {fgnet_model.nb_classes}")
-        
-    except ImportError as e:
-        logging.error(f"Failed to import FG-net modules: {e}")
-        logging.error("Make sure fgnet-main/source_code/fgnet_code exists and is accessible")
-        fgnet_model = None
-    except Exception as e:
-        logging.error(f"Failed to load FG-net model: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
-        fgnet_model = None
+    # Load pre-trained classifier model (FG-net or TransGraphNet)
+    classifier_model = None
+    classifier_type = args.classifier_type
     
-    # 检查 FG-net 模型是否加载成功
-    if fgnet_model is None:
-        logging.error("FG-net model is required but failed to load. Exiting.")
+    if classifier_type == "fgnet":
+        try:
+            import spapp_classifier
+            
+            logging.info(f"Loading FG-net model from {args.fgnet_model_path}")
+            logging.info(f"Model layer type: {args.fgnet_layer_type}")
+            
+            # 确定设备类型（适配 train.py 的格式）
+            use_gpu = torch.cuda.is_available() and str(device) != "cpu"
+            if use_gpu:
+                device_id = str(device)  # e.g., "cuda:0"
+            else:
+                device_id = "cpu"
+            
+            # 初始化模型（在加载权重之前创建）
+            classifier_model = spapp_classifier.App_Classifier(
+                nb_classes=num_classes,
+                use_gpu=use_gpu,
+                device=device_id,
+                layer_type=args.fgnet_layer_type
+            )
+            
+            # 加载模型权重（load_fgnet_model 函数会返回完整的模型对象）
+            classifier_model = load_fgnet_model(classifier_model, optimizer=None, checkpoint_path=args.fgnet_model_path)
+            
+            # 检查模型类别数是否与数据集匹配
+            model_num_classes = classifier_model.nb_classes
+            if model_num_classes != num_classes:
+                logging.warning(f"Model number of classes ({model_num_classes}) does not match dataset number of classes ({num_classes})")
+                logging.warning(f"Using model's number of classes: {model_num_classes}")
+            
+            # 确保模型在正确的设备上
+            if use_gpu:
+                device_obj = torch.device(device_id)
+                classifier_model = classifier_model.to(device_obj)
+                classifier_model.device = device_id
+            else:
+                classifier_model = classifier_model.to(torch.device("cpu"))
+                classifier_model.device = "cpu"
+            
+            # 设置为评估模式
+            classifier_model.eval()
+            
+            logging.info(f"FG-net model loaded successfully")
+            logging.info(f"Model device: {device}")
+            logging.info(f"Model number of classes: {classifier_model.nb_classes}")
+            
+        except ImportError as e:
+            logging.error(f"Failed to import FG-net modules: {e}")
+            logging.error("Make sure fgnet-main/source_code/fgnet_code exists and is accessible")
+            classifier_model = None
+        except Exception as e:
+            logging.error(f"Failed to load FG-net model: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+            classifier_model = None
+    
+    elif classifier_type == "transgraphnet":
+        try:
+            import sys
+            import dgl
+            sys.path.insert(0, './Transgraphnet')
+            from TransGraphNet import Classifier
+            
+            logging.info(f"Loading TransGraphNet model from {args.transgraphnet_model_path}")
+            
+            # 确定设备类型
+            use_gpu = torch.cuda.is_available() and str(device) != "cpu"
+            if use_gpu:
+                device_id = str(device)
+            else:
+                device_id = "cpu"
+            
+            device_obj = torch.device(device_id)
+            
+            # 初始化模型
+            classifier_model = Classifier(
+                nb_classes=num_classes,
+                latent_feature_length=256,
+                use_gpu=use_gpu,
+                device=device_id,
+                layer_type='GAT',
+                pad_length=args.pad_length,
+                bert_dir="./Transgraphnet/bert-mini" if os.path.exists("./Transgraphnet/bert-mini") else "bert-mini",
+                use_bert_encoder=True,
+                bert_num_layers=None,
+                freeze_cnn=False
+            )
+            
+            # 将模型移到设备上
+            classifier_model = classifier_model.to(device_obj)
+            classifier_model.eval()  # 先设置为eval模式，避免BatchNorm问题
+            
+            # 重要：TransGraphNet的Feature_extractor有动态初始化的层（_41Dense）
+            # 需要在加载权重之前先进行一次dummy forward pass来初始化这些层
+            logging.info("Initializing TransGraphNet model with dummy input...")
+            try:
+                # 使用训练数据构建dummy图来初始化模型
+                dummy_graph_builder = IncrementalGraphBuilder(
+                    pad_length=args.pad_length,
+                    concurrent_time_threshold=args.concurrent_time_threshold,
+                )
+                
+                # 从训练数据中取几个样本构建dummy图
+                train_packets_temp = dataset_to_packets(train_dataset)
+                dummy_graphs = []
+                
+                for packet_idx in range(min(3, len(train_packets_temp))):
+                    if packet_idx >= len(train_packets_temp):
+                        break
+                    packet_flows = train_packets_temp[packet_idx]
+                    if not packet_flows:
+                        continue
+                    
+                    dummy_graph_builder.reset()
+                    # 使用前几条流构建dummy图
+                    for flow_idx, flow in enumerate(packet_flows[:5]):
+                        dummy_graph_builder.step(flow, step_index=flow_idx)
+                    
+                    dummy_graph = dummy_graph_builder.build_classifier_graph(classifier_type="transgraphnet")
+                    if dummy_graph is not None and dummy_graph.num_nodes() > 0:
+                        dummy_graphs.append(dummy_graph.to(device_obj))
+                
+                if len(dummy_graphs) > 0:
+                    with torch.no_grad():
+                        dummy_batched = dgl.batch(dummy_graphs)
+                        _ = classifier_model(dummy_batched)  # 触发动态层初始化
+                    logging.info(f"Model initialization completed with {len(dummy_graphs)} dummy graphs")
+                else:
+                    logging.warning("Could not create dummy graphs for initialization, proceeding anyway...")
+            except Exception as init_error:
+                logging.warning(f"Failed to initialize model with dummy input: {init_error}")
+                logging.warning("Proceeding with model loading anyway, but may encounter shape mismatch errors...")
+            
+            # 加载模型权重
+            classifier_model = load_transgraphnet_model(classifier_model, optimizer=None, checkpoint_path=args.transgraphnet_model_path)
+            
+            # 检查模型类别数是否与数据集匹配
+            model_num_classes = classifier_model.nb_classes
+            if model_num_classes != num_classes:
+                logging.warning(f"Model number of classes ({model_num_classes}) does not match dataset number of classes ({num_classes})")
+                logging.warning(f"Using model's number of classes: {model_num_classes}")
+            
+            # 确保模型在正确的设备上（再次确认）
+            classifier_model = classifier_model.to(device_obj)
+            classifier_model.device = device_id
+            
+            # 设置为评估模式
+            classifier_model.eval()
+            
+            logging.info(f"TransGraphNet model loaded successfully")
+            logging.info(f"Model device: {device_obj}")
+            logging.info(f"Model number of classes: {classifier_model.nb_classes}")
+            logging.info(f"Model pad_length: {args.pad_length}")
+            
+        except ImportError as e:
+            logging.error(f"Failed to import TransGraphNet modules: {e}")
+            logging.error("Make sure Transgraphnet/TransGraphNet.py exists and is accessible")
+            classifier_model = None
+        except Exception as e:
+            logging.error(f"Failed to load TransGraphNet model: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+            classifier_model = None
+    
+    # 检查分类器模型是否加载成功
+    if classifier_model is None:
+        logging.error(f"{classifier_type.upper()} model is required but failed to load. Exiting.")
         return
     
     # 设置随机种子
@@ -455,7 +602,7 @@ def main():
             concurrent_time_threshold=args.concurrent_time_threshold,
             max_bursts=args.max_bursts,  # 传递参数
         )
-        obfuscator.set_classifier(fgnet_model)
+        obfuscator.set_classifier(classifier_model, classifier_type=classifier_type)
         obfuscator.set_defense_pool(defense_flows)
 
         best_avg_reward = -float('inf')

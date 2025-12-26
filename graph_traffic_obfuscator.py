@@ -177,7 +177,8 @@ class FlowTrafficObfuscator:
         self.memory = FlowSequenceReplayBuffer(buffer_size, batch_size)
         
         # 分类器和 Graph Builder（仅用于评估）
-        self.classifier = None  # FG-net 分类器
+        self.classifier = None  # FG-net 或 TransGraphNet 分类器
+        self.classifier_type = "fgnet"  # 分类器类型："fgnet" 或 "transgraphnet"
         self.graph_builder = incremental_builder or IncrementalGraphBuilder(
             pad_length=pad_length
         )
@@ -195,11 +196,18 @@ class FlowTrafficObfuscator:
         logging.info(f"  经验回放类型: FlowSequenceReplayBuffer")
         logging.info("=" * 80)
 
-    def set_classifier(self, classifier):
-        """设置分类器模型（FG-net）"""
+    def set_classifier(self, classifier, classifier_type: str = "fgnet"):
+        """
+        设置分类器模型
+        
+        Args:
+            classifier: 分类器模型（FG-net 或 TransGraphNet）
+            classifier_type: 分类器类型，"fgnet" 或 "transgraphnet"
+        """
         self.classifier = classifier.to(self.device)
         self.classifier.eval()
-        logging.info("FG-net classifier model has been set")
+        self.classifier_type = classifier_type
+        logging.info(f"{classifier_type.upper()} classifier model has been set")
 
     def set_defense_pool(self, defense_flows: List[Dict]):
         """设置防御流池"""
@@ -726,7 +734,7 @@ class FlowTrafficObfuscator:
                 for proc_flow in p_data['processed_flows']:
                     self.graph_builder.step(proc_flow)
                 
-                classifier_graph = self.graph_builder._build_graph(include_burst=False)
+                classifier_graph = self.graph_builder.build_classifier_graph(classifier_type=self.classifier_type)
                 if classifier_graph is not None and classifier_graph.num_nodes() > 0:
                     graphs.append(classifier_graph.to(self.device))
                     valid_indices.append(i)
@@ -1065,7 +1073,7 @@ class FlowTrafficObfuscator:
                     for proc_flow in p_data['processed_flows']:
                         self.graph_builder.step(proc_flow)
                     
-                    classifier_graph = self.graph_builder._build_graph(include_burst=False)
+                    classifier_graph = self.graph_builder.build_classifier_graph(classifier_type=self.classifier_type)
                     if classifier_graph and classifier_graph.num_nodes() > 0:
                         graphs.append(classifier_graph.to(self.device))
                         valid_indices.append(i)
